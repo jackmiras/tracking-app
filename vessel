@@ -1,0 +1,156 @@
+#!/bin/bash
+set -euo pipefail
+
+# Container name for app service at docker-compose.yml
+readonly CONTAINER_NAME="tracking_app"
+# Path to docker-compose.yml file
+readonly DOCKER_COMPOSE_FILE="_infra/docker-compose.yml"
+# Docker composer project name
+readonly DOCKER_COMPOSE_PROJECT="infra_${CONTAINER_NAME}"
+
+function configure_xdebug() {
+  cp _infra/configs/xdebug-base.ini _infra/configs/xdebug.ini
+
+  if [[ "$(uname -s)" = "Linux" ]]; then
+    configure_xdebug_linux
+  elif [[ "$(uname -s)" = "Darwin" ]]; then
+    configure_xdebug_osx
+  else
+    echo "OS not supported" && exit 1
+  fi
+}
+
+function configure_xdebug_linux() {
+  if [[ -f "$(</proc/version)" && "$(</proc/version)" = "microsoft" ]]; then
+    # If it's running in WSL
+    XDEBUG_HOST=$(grep nameserver /etc/resolv.conf | cut -d ' ' -f2)
+  fi
+
+  # If it's running in Linux
+  XDEBUG_HOST=$(hostname -I | cut -d ' ' -f1)
+
+  # Adding your current IP to 'xdebug.client_host=' at xdebug.ini
+  readonly XDEBUG_HOST
+  sed -i "s/xdebug\.client_host\=.*/xdebug\.client_host\=${XDEBUG_HOST}/g" _infra/configs/xdebug.ini
+}
+
+function configure_xdebug_osx() {
+     # If it's running in macOS
+    XDEBUG_HOST=$(ipconfig getifaddr en0)
+    readonly XDEBUG_HOST
+
+    # Adding your current IP to 'xdebug.client_host=' at xdebug.ini
+    sed -i "" -e "s/xdebug\.client_host\=.*/xdebug\.client_host\=${XDEBUG_HOST}/g" _infra/configs/xdebug.ini
+}
+
+function helper_commands() {
+  if [[ "$1" = "artisan" ]]; then
+    # Run an artisan command inside the app container.
+    docker exec --tty "${CONTAINER_NAME}" sh -c "php $*"
+
+    # Adjusting permissions in case a files are created
+    docker exec --tty "${CONTAINER_NAME}" sh -c "chown 1000:1000 -R app"
+    docker exec --tty "${CONTAINER_NAME}" sh -c "chown 1000:1000 -R resources"
+
+  fi
+
+  if [[ "$1" = "tinker" ]]; then
+    # Opening tinker (Laravel's REPL) inside the app container.
+    docker exec -it "${CONTAINER_NAME}" sh -c "php artisan tinker"
+  fi
+
+  if [[ "$1" = "phpunit" ]]; then
+    # Run an phpunit command inside the app container.
+    docker exec --tty "${CONTAINER_NAME}" sh -c "./vendor/bin/$*"
+
+  fi
+
+  if [[ "$1" = "composer" ]]; then
+    # Run an composer command inside the app container.
+    docker exec --tty "${CONTAINER_NAME}" sh -c "$*"
+  fi
+}
+
+function docker_commands() {
+  if [[ "$1" = "up" ]]; then
+    docker-compose -p "${DOCKER_COMPOSE_PROJECT}" -f "${DOCKER_COMPOSE_FILE}" up
+  fi
+
+  if [[ "$1" = "down" ]]; then
+    docker-compose -p "${DOCKER_COMPOSE_PROJECT}" -f "${DOCKER_COMPOSE_FILE}" down
+  fi
+
+  if [[ "$1" = "bash" ]]; then
+    docker exec -it "${CONTAINER_NAME}" /bin/bash
+  fi
+
+  if [[ "$1" = "docker" ]]; then
+    # Run Docker command through this script.
+    "$@"
+  fi
+
+  if [[ "$1" = "clean-all" ]]; then
+    printf "INFO: Destroying docker-compose resources \n"
+    docker-compose -p "${DOCKER_COMPOSE_PROJECT}" -f "${DOCKER_COMPOSE_FILE}" down
+
+    printf "\nINFO: Removing vendor directory \n"
+    rm -rf vendor
+
+    printf "\nINFO: Removing composer.lock \n"
+    if [[ -f composer.lock ]]; then
+      rm composer.lock
+    fi
+
+    printf "\nINFO: Killing any remaining containers \n"
+    docker kill "$(docker ps -a | grep -i "${CONTAINER_NAME}" | awk '{print $1}')" || echo ""
+
+    printf "\nINFO: Removing image \n"
+    docker image rm -f "$(docker images | grep -i "$(basename "$(pwd)")" | awk '{print $1}')"
+
+    printf "\nINFO: Removing volumes \n"
+    readonly VOLUMES=$(docker volume ls | grep -i "$(basename "$(pwd)")" | awk '{print $2}')
+    for volume in ${VOLUMES}; do
+      docker volume rm -f "${volume}"
+    done
+
+    printf "\nINFO: Listing running containers \n"
+    docker ps -a | grep -i "${CONTAINER_NAME}" || echo ""
+
+    printf "\nINFO: Listing existing volumes \n"
+    docker volume ls | grep -i "$(basename "$(pwd)")"
+  fi
+
+  if [ "$1" = "docker-compose" ]; then
+    # Run docker-compose command through this script.
+    "$@"
+  fi
+}
+
+function continuous_integration() {
+  if [[ "$1" = "tests" ]]; then
+    docker exec --tty "${CONTAINER_NAME}" sh -c "_infra/ci/tests.sh"
+  fi
+
+  if [[ "$1" = "linters" ]]; then
+    docker exec --tty "${CONTAINER_NAME}" sh -c "_infra/ci/linters.sh"
+  fi
+
+  if [[ "$1" = "fixers" ]]; then
+    docker exec --tty "${CONTAINER_NAME}" sh -c "_infra/ci/fixers.sh"
+  fi
+
+  if [[ "$1" = "static-analysis" ]]; then
+    docker exec --tty "${CONTAINER_NAME}" sh -c "_infra/ci/static-analysis.sh.sh"
+  fi
+}
+
+function main() {
+  configure_xdebug
+
+  helper_commands "$@"
+  docker_commands "$@"
+
+  continuous_integration "$@"
+}
+
+main "$@"
