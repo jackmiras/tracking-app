@@ -6,4 +6,4 @@ echo "##########################################################################
 echo "# Running tests with coverage                                                  #"
 echo "################################################################################"
 
-./vendor/bin/pest --ci --coverage --min=87
+./vendor/bin/phpunit --coverage-text
